@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "IoTProcessor": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}
