@@ -59,7 +59,7 @@ public class TelemetryProcessor : BackgroundService
                 var json = System.Text.Json.JsonSerializer.Serialize(state);
                 _db.Put(key, json);
 
-                _logger.LogDebug("Device {DeviceId}: sum={Sum}, count={Count}", telemetry.DeviceId, state.Sum, 
+                _logger.LogInformation("Device {DeviceId}: sum={Sum}, count={Count}", telemetry.DeviceId, state.Sum, 
                     state.Count);
 
                 _consumer.Commit(result);
