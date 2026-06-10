@@ -42,6 +42,10 @@ public class TelemetryProcessor : BackgroundService
                 using var stream = new MemoryStream(result.Message.Value);
                 var telemetry = Serializer.Deserialize<TelemetryProtobuf>(stream);
 
+                var podName = Environment.GetEnvironmentVariable("HOSTNAME") ?? "unknown";
+                _logger.LogInformation("Pod {PodName} processing device {DeviceId}, ts={Timestamp}, value={Value}",
+                    podName, telemetry.DeviceId, telemetry.TimestampMs, telemetry.Value);
+
                 long currentWindow = (telemetry.TimestampMs / 60000) * 60000;
 
                 if (!state.TryGetValue(telemetry.DeviceId, out var agg))
