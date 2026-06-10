@@ -47,12 +47,10 @@ public class TelemetryProcessor : BackgroundService
                 if (!state.TryGetValue(telemetry.DeviceId, out var agg))
                 {
                     state[telemetry.DeviceId] = (telemetry.Value, 1, currentWindow);
-                    _logger.LogInformation("New window for device {DeviceId}: {WindowStart}", telemetry.DeviceId, currentWindow);
-                    _consumer.Commit(result);
-                    continue;
+                    _logger.LogInformation("New window for device {DeviceId}: WindowStart={Ws}, Count=1",
+                        telemetry.DeviceId, currentWindow);
                 }
-
-                if (currentWindow != agg.WindowStart)
+                else if (currentWindow != agg.WindowStart)
                 {
                     if (agg.Count > 0)
                     {
@@ -87,13 +85,16 @@ public class TelemetryProcessor : BackgroundService
                     }
 
                     state[telemetry.DeviceId] = (telemetry.Value, 1, currentWindow);
-                    _logger.LogInformation("New window for device {DeviceId}: {WindowStart}", telemetry.DeviceId, currentWindow);
+                    _logger.LogInformation("New window for device {DeviceId}: WindowStart={Ws}, Count=1",
+                        telemetry.DeviceId, currentWindow);
                 }
                 else
                 {
                     agg.Sum += telemetry.Value;
                     agg.Count++;
                     state[telemetry.DeviceId] = agg;
+                    _logger.LogInformation("Updated window for device {DeviceId}: WindowStart={Ws}, Sum={Sum}, Count={Count}",
+                        telemetry.DeviceId, agg.WindowStart, agg.Sum, agg.Count);
                 }
 
                 _consumer.Commit(result);
