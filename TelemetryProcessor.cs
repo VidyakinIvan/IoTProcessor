@@ -1,8 +1,11 @@
-﻿using Confluent.Kafka;
+﻿using ClickHouse.Client;
+using Confluent.Kafka;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ProtoBuf;
 using RocksDbSharp;
+using System.Globalization;
+using System.Text;
 
 namespace IoTProcessor;
 
@@ -29,38 +32,69 @@ public class TelemetryProcessor : BackgroundService
         _consumer.Subscribe("raw.telemetry");
         _logger.LogInformation("Processor started, subscribed to raw.telemetry");
 
+        var state = new Dictionary<int, (double Sum, int Count, long WindowStart)>();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 var result = _consumer.Consume(stoppingToken);
+                using var stream = new MemoryStream(result.Message.Value);
+                var telemetry = Serializer.Deserialize<TelemetryProtobuf>(stream);
 
-                using var ms = new MemoryStream(result.Message.Value);
-                var telemetry = Serializer.Deserialize<TelemetryProtobuf>(ms);
+                long currentWindow = (telemetry.TimestampMs / 60000) * 60000;
 
-                var windowStart = (telemetry.TimestampMs / 60000) * 60000;
-                var key = $"{telemetry.DeviceId}:{windowStart}";
-
-                var existing = _db.Get(key);
-                State state;
-                if (existing != null)
+                if (!state.TryGetValue(telemetry.DeviceId, out var agg))
                 {
-                    var deserialized = System.Text.Json.JsonSerializer.Deserialize<State>(existing);
-                    state = deserialized ?? new State(0, 0);
+                    state[telemetry.DeviceId] = (telemetry.Value, 1, currentWindow);
+                    _logger.LogInformation("New window for device {DeviceId}: {WindowStart}", telemetry.DeviceId, currentWindow);
+                    _consumer.Commit(result);
+                    continue;
+                }
+
+                if (currentWindow != agg.WindowStart)
+                {
+                    if (agg.Count > 0)
+                    {
+                        var avg = agg.Sum / agg.Count;
+                        _logger.LogInformation("Closing window for device {DeviceId}: WindowStart={Ws}, Count={Cnt}, Avg={Avg}",
+                            telemetry.DeviceId, agg.WindowStart, agg.Count, avg);
+
+                        try
+                        {
+                            using var httpClient = new HttpClient();
+                            var query = $"INSERT INTO telemetry_avg (device_id, window_start, avg_value) VALUES ({telemetry.DeviceId}, fromUnixTimestamp64Milli({agg.WindowStart}), {avg.ToString(CultureInfo.InvariantCulture)})";
+                            var content = new StringContent(query, Encoding.UTF8, "application/x-www-form-urlencoded");
+
+                            var auth = Convert.ToBase64String(Encoding.ASCII.GetBytes("default:qwerty"));
+                            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", auth);
+
+                            var response = await httpClient.PostAsync("http://clickhouse.clickhouse:8123/", content, stoppingToken);
+                            if (response.IsSuccessStatusCode)
+                            {
+                                _logger.LogInformation("Saved to ClickHouse: device={DeviceId}, avg={Avg}", telemetry.DeviceId, avg);
+                            }
+                            else
+                            {
+                                var error = await response.Content.ReadAsStringAsync(stoppingToken);
+                                _logger.LogWarning("Failed to save to ClickHouse: {Error}", error);
+                            }
+                        }
+                        catch (Exception chEx)
+                        {
+                            _logger.LogError(chEx, "HTTP error saving to ClickHouse");
+                        }
+                    }
+
+                    state[telemetry.DeviceId] = (telemetry.Value, 1, currentWindow);
+                    _logger.LogInformation("New window for device {DeviceId}: {WindowStart}", telemetry.DeviceId, currentWindow);
                 }
                 else
                 {
-                    state = new State(0, 0);
+                    agg.Sum += telemetry.Value;
+                    agg.Count++;
+                    state[telemetry.DeviceId] = agg;
                 }
-
-
-                state = state with { Sum = state.Sum + telemetry.Value, Count = state.Count + 1 };
-
-                var json = System.Text.Json.JsonSerializer.Serialize(state);
-                _db.Put(key, json);
-
-                _logger.LogInformation("Device {DeviceId}: sum={Sum}, count={Count}", telemetry.DeviceId, state.Sum, 
-                    state.Count);
 
                 _consumer.Commit(result);
             }
