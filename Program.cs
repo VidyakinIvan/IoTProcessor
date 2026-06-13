@@ -15,6 +15,7 @@ builder.Services.AddSingleton<IConsumer<string, byte[]>>(sp =>
         BootstrapServers = kafkaBootstrap,
         GroupId = "processor-group",
         AutoOffsetReset = AutoOffsetReset.Earliest,
+        IsolationLevel = IsolationLevel.ReadCommitted,
         EnableAutoCommit = false
     };
     return new ConsumerBuilder<string, byte[]>(config).Build();
