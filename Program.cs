@@ -3,6 +3,7 @@ using IoTProcessor;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using OpenTelemetry.Metrics;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -20,6 +21,11 @@ builder.Services.AddSingleton<IConsumer<string, byte[]>>(sp =>
     };
     return new ConsumerBuilder<string, byte[]>(config).Build();
 });
+
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics
+        .AddMeter("IoTProcessor")
+        .AddPrometheusExporter());
 
 builder.Services.AddHostedService<TelemetryProcessor>();
 builder.Logging.AddConsole();

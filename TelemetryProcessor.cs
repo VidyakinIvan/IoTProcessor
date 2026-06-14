@@ -5,6 +5,8 @@ using ProtoBuf;
 using RocksDbSharp;
 using System.Globalization;
 using System.Text;
+using System.Diagnostics.Metrics;
+using System.Diagnostics;
 
 namespace IoTProcessor;
 
@@ -17,6 +19,23 @@ public class TelemetryProcessor : BackgroundService
     private readonly RocksDb _db;
     private readonly string _dbPath = "/data/rocksdb";
     private DateTime _lastCheckpoint = DateTime.UtcNow;
+
+    private static readonly Meter Meter = new("IoTProcessor", "1.0.0");
+    private static readonly Counter<long> ProcessedMessages = Meter.CreateCounter<long>(
+        "processor_messages_total", "messages", "Total processed messages");
+    private static readonly Counter<long> ProcessedErrors = Meter.CreateCounter<long>(
+        "processor_errors_total", "errors", "Total processing errors");
+    private static readonly Histogram<double> ProcessingLatency = Meter.CreateHistogram<double>(
+        "processor_latency_ms", "ms", "Processing latency from consume to ClickHouse write");
+    private static readonly Counter<long> SavedToClickhouse = Meter.CreateCounter<long>(
+        "processor_clickhouse_saved_total", "messages", "Successfully saved to ClickHouse");
+    private static readonly Counter<long> ClickhouseErrors = Meter.CreateCounter<long>(
+        "processor_clickhouse_errors_total", "errors", "Failed to save to ClickHouse");
+    private readonly ObservableGauge<long> RocksDbSize;
+    private static readonly Counter<long> AnomaliesDetected = Meter.CreateCounter<long>(
+        "processor_anomalies_total", "anomalies", "Detected anomalies");
+    private static readonly Counter<long> OutliersFiltered = Meter.CreateCounter<long>(
+        "processor_outliers_total", "outliers", "Filtered outliers");
 
     private readonly Dictionary<int, string> _deviceMetadata = new()
     {
@@ -31,6 +50,9 @@ public class TelemetryProcessor : BackgroundService
 
         var options = new DbOptions().SetCreateIfMissing(true);
         _db = RocksDb.Open(options, _dbPath);
+
+        RocksDbSize = Meter.CreateObservableGauge<long>(
+            "processor_rocksdb_size_bytes", () => GetRocksDbSize(), "bytes", "RocksDB data size");
     }
 
     private string MakeKey(int deviceId, long windowStart) => $"{deviceId}:{windowStart}";
@@ -123,6 +145,24 @@ public class TelemetryProcessor : BackgroundService
         }
     }
 
+    private long GetRocksDbSize()
+    {
+        try
+        {
+            if (Directory.Exists(_dbPath))
+            {
+                return new DirectoryInfo(_dbPath)
+                    .GetFiles("*", SearchOption.AllDirectories)
+                    .Sum(f => f.Length);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get RocksDB size");
+        }
+        return 0;
+    }
+
     private class CheckpointEntry
     {
         public int DeviceId { get; set; }
@@ -143,6 +183,9 @@ public class TelemetryProcessor : BackgroundService
             try
             {
                 var result = _consumer.Consume(stoppingToken);
+
+                var stopwatch = Stopwatch.StartNew();
+
                 using var stream = new MemoryStream(result.Message.Value);
                 var telemetry = Serializer.Deserialize<TelemetryProtobuf>(stream);
 
@@ -155,6 +198,7 @@ public class TelemetryProcessor : BackgroundService
                 if (telemetry.Value < -50 || telemetry.Value > 150)
                 {
                     _logger.LogWarning("Filtered out outlier from device {DeviceId}: {Value}", telemetry.DeviceId, telemetry.Value);
+                    OutliersFiltered.Add(1);
                     _consumer.Commit(result);
                     continue;
                 }
@@ -186,6 +230,7 @@ public class TelemetryProcessor : BackgroundService
                         {
                             _logger.LogWarning("Anomaly: device {DeviceId}, value {Value} deviates from avg {Avg} by {Dev}",
                                 telemetry.DeviceId, telemetry.Value, currentAvg, deviation);
+                            AnomaliesDetected.Add(1);
                         }
                     }
                 }
@@ -209,22 +254,29 @@ public class TelemetryProcessor : BackgroundService
                         if (response.IsSuccessStatusCode)
                         {
                             _logger.LogInformation("Saved to ClickHouse: device={DeviceId}, avg={Avg}", telemetry.DeviceId, avg);
+                            SavedToClickhouse.Add(1);
                         }
                         else
                         {
                             var error = await response.Content.ReadAsStringAsync(stoppingToken);
                             _logger.LogWarning("Failed to save to ClickHouse: {Error}", error);
+                            ClickhouseErrors.Add(1);
                         }
                     }
                     catch (Exception chEx)
                     {
                         _logger.LogError(chEx, "HTTP error saving to ClickHouse");
+                        ClickhouseErrors.Add(1);
                     }
 
                     DeleteFromRocksDb(telemetry.DeviceId, prevWindow);
                 }
 
                 _consumer.Commit(result);
+
+                ProcessedMessages.Add(1, new KeyValuePair<string, object?>("pod", podName));
+                stopwatch.Stop();
+                ProcessingLatency.Record(stopwatch.Elapsed.TotalMilliseconds);
 
                 if ((DateTime.UtcNow - _lastCheckpoint).TotalSeconds >= 10)
                 {
@@ -235,6 +287,7 @@ public class TelemetryProcessor : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error processing message");
+                ProcessedErrors.Add(1);
             }
         }
     }
