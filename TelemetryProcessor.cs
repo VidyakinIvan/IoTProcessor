@@ -37,6 +37,9 @@ public class TelemetryProcessor : BackgroundService
     private static readonly Counter<long> OutliersFiltered = Meter.CreateCounter<long>(
         "processor_outliers_total", "outliers", "Filtered outliers");
 
+    private DateTime _lastSuccessfulProcessing = DateTime.UtcNow;
+    private long _lastCommittedOffset = 0;
+
     private readonly Dictionary<int, string> _deviceMetadata = new()
     {
         { 1, "Moscow" }, { 2, "SPb" }, { 3, "Kazan" }, { 4, "Novosibirsk" }, { 5, "Sochi" },
@@ -277,6 +280,8 @@ public class TelemetryProcessor : BackgroundService
                 ProcessedMessages.Add(1, new KeyValuePair<string, object?>("pod", podName));
                 stopwatch.Stop();
                 ProcessingLatency.Record(stopwatch.Elapsed.TotalMilliseconds);
+                _lastSuccessfulProcessing = DateTime.UtcNow;
+                _lastCommittedOffset = result.Offset.Value;
 
                 if ((DateTime.UtcNow - _lastCheckpoint).TotalSeconds >= 10)
                 {
