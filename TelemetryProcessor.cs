@@ -37,8 +37,22 @@ public class TelemetryProcessor : BackgroundService
     private static readonly Counter<long> OutliersFiltered = Meter.CreateCounter<long>(
         "processor_outliers_total", "outliers", "Filtered outliers");
 
-    private DateTime _lastSuccessfulProcessing = DateTime.UtcNow;
-    private long _lastCommittedOffset = 0;
+    private static readonly ObservableGauge<double> LastSuccessfulTimestamp = Meter.CreateObservableGauge<double>(
+        "processor_last_successful_timestamp_seconds",
+        () => _lastSuccessfulProcessing > DateTime.MinValue
+            ? new DateTimeOffset(_lastSuccessfulProcessing).ToUnixTimeMilliseconds() / 1000.0
+            : 0,
+        "seconds",
+        "Last successful processing timestamp");
+
+    private static readonly ObservableGauge<long> LastCommittedOffset = Meter.CreateObservableGauge<long>(
+        "processor_last_committed_offset",
+        () => _lastCommittedOffset,
+        "offset",
+        "Last committed Kafka offset");
+
+    private static DateTime _lastSuccessfulProcessing = DateTime.UtcNow;
+    private static long _lastCommittedOffset = 0;
 
     private readonly Dictionary<int, string> _deviceMetadata = new()
     {
