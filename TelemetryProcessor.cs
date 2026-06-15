@@ -295,7 +295,7 @@ public class TelemetryProcessor : BackgroundService
                 stopwatch.Stop();
                 ProcessingLatency.Record(stopwatch.Elapsed.TotalMilliseconds);
                 _lastSuccessfulProcessing = DateTime.UtcNow;
-                _lastCommittedOffset = result.Offset.Value;
+                _lastCommittedOffset = 0;
 
                 if ((DateTime.UtcNow - _lastCheckpoint).TotalSeconds >= 10)
                 {
